@@ -1,0 +1,107 @@
+version: '3'
+x-airflow-common:
+  &airflow-common
+  build: ${LOCAL_PATH}/airflow_env
+  image: ${AIRFLOW_IMAGE_NAME:-extending_airflow:latest}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://myuser:mypassword@postgres-db:5432/mercadoPago
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 10
+  volumes:
+    - ${LOCAL_PATH}/airflow_env/dags:/opt/airflow/dags
+    - ${LOCAL_PATH}/airflow_env/logs:/opt/airflow/logs
+    - ${LOCAL_PATH}/airflow_env/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-50000}"
+  networks:
+    - my_network
+  depends_on:
+    postgres-db:
+      condition: service_healthy
+
+services:
+
+  pyspark_notebook:
+    container_name: "pyspark_notebook-service"
+    build:
+      context: ${LOCAL_PATH}/spark_env
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/home/jovyan/work
+    command: start-notebook.sh --ip=0.0.0.0
+    networks:
+      - my_network
+    depends_on:
+      - postgres-db
+
+  postgres-db:
+    container_name: "postgres-db"
+    environment:
+      POSTGRES_DB: 'mercadoPago'
+      POSTGRES_USER: 'myuser'
+      POSTGRES_PASSWORD: 'mypassword'
+    image: postgres:13
+    restart: always
+    ports:
+      - "5432:5432"
+    volumes:
+      - data_volume:/var/lib/postgresql/data
+    networks:
+      - my_network
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "myuser" ]
+      interval: 5s
+      retries: 5
+
+  minio:
+    container_name: "minio"
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: "ROOTNAME"
+      MINIO_ROOT_PASSWORD: "CHANGEME123"
+    command: server /data --console-address ":9001"
+    networks:
+      - my_network
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - 8080:8080
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+volumes:
+  data_volume:
+  minio_data:
+
+networks:
+  my_network:
